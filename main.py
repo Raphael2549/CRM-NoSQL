@@ -2,15 +2,17 @@ from fastapi import FastAPI
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 from typing import Optional
+from datetime import datetime
+from datetime import datetime, timedelta
+
+from collections import Counter
 
 app = FastAPI()
 
-# String de conexão com MongoDB Atlas
-uri = "mongodb+srv://raphaelbatista:Racb2004@ufu-nosql.lu5rjbx.mongodb.net/?retryWrites=true&w=majority&appName=UFU-NoSQL"
 
-# Cria cliente Mongo com Server API versão 1
+uri = "mongodb+srv://raphaelbatista:@ufu-nosql.lu5rjbx.mongodb.net/?retryWrites=true&w=majority&appName=UFU-NoSQL"
+
 client = MongoClient(uri, server_api=ServerApi('1'))
-
 # Define banco e coleções
 db = client["CRM_Salão"]
 clientes = db["clientes"]
@@ -24,18 +26,18 @@ def startup_event():
     # cria índices aqui
 
     # Criação dos índices ao iniciar a API
-    clientes.create_index("preferencias")
     clientes.create_index("email", unique=True)
-    servicos.create_index("nome", unique=True)
     campanhas.create_index("status")
-    feedbacks.create_index("cliente_email")
-    agendamentos.create_index("cliente_email")
-    agendamentos.create_index("dataHora")
-    print("Índices criados com sucesso!")
+    campanhas.create_index("segmento")
+    feedbacks.create_index("servico")
+    agendamentos.create_index("status")
 
-@app.get("/")
-async def root():
-    return {"message": "API rodando e MongoDB conectou com índices criados!"}
+# Limpar coleções
+db.clientes.delete_many({})
+db.servicos.delete_many({})
+db.campanhas.delete_many({})
+db.feedbacks.delete_many({})
+db.agendamentos.delete_many({})
 
 # Dados de exemplo
 clientes_exemplos = [
@@ -44,7 +46,6 @@ clientes_exemplos = [
         "email": "fernanda.lima1@email.com",
         "telefone": "11910000001",
         "dataNascimento": "1987-04-10",
-        "preferencias": ["corte", "manicure", "escova"],
         "visitas": [
             {"data": "2025-08-01", "serviço": "manicure"},
             {"data": "2025-07-15", "serviço": "escova"}
@@ -57,7 +58,6 @@ clientes_exemplos = [
         "email": "lucas.souza2@email.com",
         "telefone": "11910000002",
         "dataNascimento": "1991-09-21",
-        "preferencias": ["hidratação", "pintura de cabelo"],
         "visitas": [
             {"data": "2025-07-20", "serviço": "hidratação"},
             {"data": "2025-06-30", "serviço": "pintura de cabelo"}
@@ -70,7 +70,6 @@ clientes_exemplos = [
         "email": "camila.ferreira3@email.com",
         "telefone": "11910000003",
         "dataNascimento": "1990-02-11",
-        "preferencias": ["escova", "manicure"],
         "visitas": [
             {"data": "2025-07-25", "serviço": "escova"},
             {"data": "2025-07-05", "serviço": "manicure"}
@@ -83,7 +82,6 @@ clientes_exemplos = [
         "email": "bruno.santos4@email.com",
         "telefone": "11910000004",
         "dataNascimento": "1985-07-19",
-        "preferencias": ["corte", "hidratação"],
         "visitas": [
             {"data": "2025-07-18", "serviço": "corte"},
             {"data": "2025-06-10", "serviço": "hidratação"}
@@ -96,7 +94,6 @@ clientes_exemplos = [
         "email": "juliana.almeida5@email.com",
         "telefone": "11910000005",
         "dataNascimento": "1993-12-02",
-        "preferencias": ["manicure", "pintura de cabelo"],
         "visitas": [
             {"data": "2025-07-22", "serviço": "manicure"},
             {"data": "2025-06-25", "serviço": "pintura de cabelo"}
@@ -109,7 +106,6 @@ clientes_exemplos = [
         "email": "ricardo.oliveira6@email.com",
         "telefone": "11910000006",
         "dataNascimento": "1988-11-30",
-        "preferencias": ["hidratação", "escova"],
         "visitas": [
             {"data": "2025-07-20", "serviço": "hidratação"},
             {"data": "2025-07-01", "serviço": "escova"}
@@ -122,7 +118,6 @@ clientes_exemplos = [
         "email": "patricia.costa7@email.com",
         "telefone": "11910000007",
         "dataNascimento": "1984-03-14",
-        "preferencias": ["corte", "manicure", "escova"],
         "visitas": [
             {"data": "2025-07-28", "serviço": "corte"},
             {"data": "2025-06-28", "serviço": "manicure"}
@@ -135,7 +130,6 @@ clientes_exemplos = [
         "email": "thiago.martins8@email.com",
         "telefone": "11910000008",
         "dataNascimento": "1986-05-07",
-        "preferencias": ["pintura de cabelo", "hidratação"],
         "visitas": [
             {"data": "2025-07-15", "serviço": "pintura de cabelo"},
             {"data": "2025-07-03", "serviço": "hidratação"}
@@ -148,7 +142,6 @@ clientes_exemplos = [
         "email": "carla.nunes9@email.com",
         "telefone": "11910000009",
         "dataNascimento": "1992-08-23",
-        "preferencias": ["manicure", "escova"],
         "visitas": [
             {"data": "2025-07-19", "serviço": "manicure"},
             {"data": "2025-06-29", "serviço": "escova"}
@@ -161,7 +154,6 @@ clientes_exemplos = [
         "email": "diego.ribeiro10@email.com",
         "telefone": "11910000010",
         "dataNascimento": "1989-01-30",
-        "preferencias": ["corte", "hidratação"],
         "visitas": [
             {"data": "2025-07-21", "serviço": "corte"},
             {"data": "2025-06-30", "serviço": "hidratação"}
@@ -174,7 +166,6 @@ clientes_exemplos = [
         "email": "isabela.moreira11@email.com",
         "telefone": "11910000011",
         "dataNascimento": "1987-06-15",
-        "preferencias": ["manicure", "pintura de cabelo"],
         "visitas": [
             {"data": "2025-07-18", "serviço": "manicure"},
             {"data": "2025-07-01", "serviço": "pintura de cabelo"}
@@ -187,7 +178,6 @@ clientes_exemplos = [
         "email": "marcos.lima12@email.com",
         "telefone": "11910000012",
         "dataNascimento": "1990-10-12",
-        "preferencias": ["escova", "hidratação"],
         "visitas": [
             {"data": "2025-07-23", "serviço": "escova"},
             {"data": "2025-07-03", "serviço": "hidratação"}
@@ -200,7 +190,6 @@ clientes_exemplos = [
         "email": "natalia.santos13@email.com",
         "telefone": "11910000013",
         "dataNascimento": "1985-09-27",
-        "preferencias": ["corte", "manicure"],
         "visitas": [
             {"data": "2025-07-26", "serviço": "corte"},
             {"data": "2025-07-05", "serviço": "manicure"}
@@ -213,7 +202,6 @@ clientes_exemplos = [
         "email": "paulo.almeida14@email.com",
         "telefone": "11910000014",
         "dataNascimento": "1988-02-08",
-        "preferencias": ["pintura de cabelo", "escova"],
         "visitas": [
             {"data": "2025-07-17", "serviço": "pintura de cabelo"},
             {"data": "2025-06-28", "serviço": "escova"}
@@ -226,7 +214,6 @@ clientes_exemplos = [
         "email": "renata.ferreira15@email.com",
         "telefone": "11910000015",
         "dataNascimento": "1991-11-11",
-        "preferencias": ["hidratação", "manicure"],
         "visitas": [
             {"data": "2025-07-20", "serviço": "hidratação"},
             {"data": "2025-07-02", "serviço": "manicure"}
@@ -239,7 +226,6 @@ clientes_exemplos = [
         "email": "sandro.gomes16@email.com",
         "telefone": "11910000016",
         "dataNascimento": "1984-07-03",
-        "preferencias": ["corte", "pintura de cabelo"],
         "visitas": [
             {"data": "2025-07-22", "serviço": "corte"},
             {"data": "2025-07-06", "serviço": "pintura de cabelo"}
@@ -252,7 +238,6 @@ clientes_exemplos = [
         "email": "tatiana.rocha17@email.com",
         "telefone": "11910000017",
         "dataNascimento": "1989-04-19",
-        "preferencias": ["manicure", "escova"],
         "visitas": [
             {"data": "2025-07-24", "serviço": "manicure"},
             {"data": "2025-07-04", "serviço": "escova"}
@@ -265,7 +250,6 @@ clientes_exemplos = [
         "email": "vitor.carvalho18@email.com",
         "telefone": "11910000018",
         "dataNascimento": "1993-01-05",
-        "preferencias": ["hidratação", "pintura de cabelo"],
         "visitas": [
             {"data": "2025-07-21", "serviço": "hidratação"},
             {"data": "2025-07-02", "serviço": "pintura de cabelo"}
@@ -706,55 +690,83 @@ agendamentos_exemplos = [
         "status": "confirmado"
     }
 ]
+db.servicos.insert_many(servicos_exemplos)
+db.campanhas.insert_many(campanhas_exemplos)
+db.feedbacks.insert_many(feedbacks_exemplos)
+db.agendamentos.insert_many(agendamentos_exemplos)
+
+servicos_para_visitas = [
+    "manicure", "escova", "hidratação", "pintura de cabelo", "corte", 
+    "spa capilar", "massagem relaxante", "alongamento de unhas", "design de sobrancelhas"
+]
+
+# Data base para visitas: 10 dias antes da última visita e até a última visita
+# Para cada cliente:
+clientes_para_inserir = []
+for c in clientes_exemplos:
+    visitas = []
+    data_base = datetime.strptime(c["ultimaVisita"], "%Y-%m-%d")
+    # Criar 10 visitas, uma a cada 3 dias antes da última visita
+    for i in range(10):
+        data_visita = (data_base - timedelta(days=3 * (9 - i))).strftime("%Y-%m-%d")
+        servico = servicos_para_visitas[i % len(servicos_para_visitas)]
+        visitas.append({"data": data_visita, "serviço": servico})
+    cliente_novo = c.copy()
+    cliente_novo["visitas"] = visitas
+    cliente_novo["ultimaVisita"] = visitas[-1]["data"]  # atualiza para a última data gerada
+    clientes_para_inserir.append(cliente_novo)
+
+# Inserir clientes no banco
+db.clientes.insert_many(clientes_para_inserir)
+
+print("População concluída com sucesso!")
 
 
 app = FastAPI()
 
-@app.post("/popula-dados")
-def popula_dados():
-    for c in clientes_exemplos:
-        clientes.update_one(
-            {"email": c["email"]},
-            {"$setOnInsert": c},
-            upsert=True
-        )
-    for s in servicos_exemplos:
-        servicos.update_one(
-            {"nome": s["nome"]},
-            {"$setOnInsert": s},
-            upsert=True
-        )
-    for c in campanhas_exemplos:
-        campanhas.update_one(
-            {"nome": c["nome"]},
-            {"$setOnInsert": c},
-            upsert=True
-        )
-    for f in feedbacks_exemplos:
-        feedbacks.update_one(
-            {"cliente_email": f["cliente_email"], "servico": f["servico"], "data": f["data"]},
-            {"$setOnInsert": f},
-            upsert=True
-        )
-    for a in agendamentos_exemplos:
-        agendamentos.update_one(
-            {"cliente_email": a["cliente_email"], "servico": a["servico"], "dataHora": a["dataHora"]},
-            {"$setOnInsert": a},
-            upsert=True
-        )
-    return {"status": "Dados de exemplo inseridos (ou já existentes)"}
 
 
-@app.get("/clientes/preferencias")
-async def buscar_clientes_por_preferencia(pref: str):
-    resultados = list(clientes.find({"preferencias": pref}, {"_id": 0}))
-    return {"clientes": resultados}
+@app.get("/clientes/preferencias_dinamicas")
+def calcular_preferencias_dinamicamente(email: str):
+    cliente = clientes.find_one({"email": email}, {"_id": 0, "visitas": 1})
+    
+    if not cliente or "visitas" not in cliente:
+        return {"erro": "Cliente não encontrado ou sem visitas registradas"}
 
-@app.get("/servicos/ordenar_preco")
-async def listar_servicos_ordenados_por_preco(asc: Optional[bool] = True):
-    ordem = 1 if asc else -1
-    resultados = list(servicos.find({}, {"_id": 0}).sort("preco", ordem))
-    return {"servicos": resultados}
+    # Conta quantas vezes cada serviço foi utilizado
+    servicos_consumidos = [visita["serviço"] for visita in cliente["visitas"]]
+    preferencias_contadas = Counter(servicos_consumidos).most_common()
+
+    # Extrai apenas os serviços em ordem de frequência
+    preferencias_ordenadas = [servico for servico, _ in preferencias_contadas]
+
+    return {
+        "email": email,
+        "preferencias_calculadas": preferencias_ordenadas
+    }
+
+
+
+@app.get("/servicos/mais_comprados")
+async def listar_servicos_mais_comprados():
+    # Busca todos os clientes
+    clientes_cursor = clientes.find({}, {"visitas.serviço": 1, "_id": 0})
+    
+    # Contador de serviços
+    contador = Counter()
+    
+    for cliente in clientes_cursor:
+        visitas = cliente.get("visitas", [])
+        for visita in visitas:
+            servico = visita.get("serviço")
+            if servico:
+                contador[servico] += 1
+    
+    # Ordena os serviços do mais para o menos comprado
+    mais_comprados = sorted(contador.items(), key=lambda x: x[1], reverse=True)
+
+    return {"servicos_mais_comprados": mais_comprados}
+
 
 @app.get("/campanhas/ativas")
 async def campanhas_ativas_para_segmento(segmento: Optional[str] = None):
@@ -764,10 +776,23 @@ async def campanhas_ativas_para_segmento(segmento: Optional[str] = None):
     resultados = list(campanhas.find(filtro, {"_id": 0}))
     return {"campanhas": resultados}
 
-@app.get("/feedbacks/buscar")
-async def buscar_feedbacks_por_nota_servico(nota: int, servico: str):
-    resultados = list(feedbacks.find({"nota": nota, "servico": servico}, {"_id": 0}))
-    return {"feedbacks": resultados}
+@app.get("/feedbacks/media")
+async def calcular_nota_media(servico: str):
+    cursor = feedbacks.find({"servico": servico}, {"_id": 0, "nota": 1})
+    
+    notas = [doc["nota"] for doc in cursor if "nota" in doc]
+    
+    if not notas:
+        return {"servico": servico, "mensagem": "Nenhum feedback encontrado."}
+    
+    media = sum(notas) / len(notas)
+    
+    return {
+        "servico": servico,
+        "quantidade_feedbacks": len(notas),
+        "nota_media": round(media, 2)
+    }
+
 
 @app.get("/agendamentos/status")
 async def buscar_agendamentos_por_status(status: str = "confirmado"):
