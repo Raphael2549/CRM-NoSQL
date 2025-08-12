@@ -8,6 +8,8 @@ import random
 from contextlib import asynccontextmanager
 from collections import Counter
 import os
+from bson import ObjectId
+
 
 mongo_uri = os.getenv("MONGODB_URI")
 
@@ -64,7 +66,7 @@ def listar_clientes(nome: Optional[str] = None, email: Optional[str] = None, ult
     if nome:
         match_stage["nome"] = {"$regex": nome, "$options": "i"}
     if email:
-        match_stage["email"] = {"$regex": email, "$options": "i"}
+        match_stage["email"] =  email
     if ultima_visita:
         match_stage["ultimaVisita"] = ultima_visita
 
