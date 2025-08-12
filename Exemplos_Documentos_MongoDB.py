@@ -7,10 +7,11 @@ from datetime import datetime, timedelta
 import random
 from contextlib import asynccontextmanager
 from collections import Counter
+import os
 
-uri = "mongodb+srv://raphaelbatista:@ufu-nosql.lu5rjbx.mongodb.net/?retryWrites=true&w=majority&appName=UFU-NoSQL"
+mongo_uri = os.getenv("MONGODB_URI")
 
-client = MongoClient(uri, server_api=ServerApi('1'))
+client = MongoClient(mongo_uri, server_api=ServerApi('1'))
 
 db = client["CRM_Salão"]
 
