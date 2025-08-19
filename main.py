@@ -9,6 +9,14 @@ from contextlib import asynccontextmanager
 from collections import Counter
 import os
 from bson import ObjectId
+import redis
+from dotenv import load_dotenv
+
+load_dotenv()
+redis_uri = os.getenv("REDIS_URL")
+# Conectar ao Redis Cloud
+redis_client = redis.from_url(redis_uri, decode_responses=True)
+    
 
 
 mongo_uri = os.getenv("MONGODB_URI")
@@ -35,6 +43,7 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(lifespan=lifespan)
+
 # --------------------------
 #CADASTRO DE CLIENTES
 # --------------------------
@@ -104,6 +113,10 @@ def aniversariantes_do_mes(mes: Optional[int] = None):
 # --------------------------
 @app.get("/clientes/frequencia")
 def ranking_clientes_frequentes():
+    cache_key = "ranking_clientes"
+    if (cache := redis_client.get(cache_key)):
+        return {"ranking_clientes": eval(cache)}
+
     pipeline = [
         {"$unwind": "$visitas"},
         {"$group": {
@@ -116,6 +129,7 @@ def ranking_clientes_frequentes():
     ]
 
     resultados = list(clientes.aggregate(pipeline))
+    redis_client.setex(cache_key, 120, str(resultados))
     return {"ranking_clientes": resultados}
 
 # --------------------------
@@ -200,6 +214,10 @@ def listar_servicos_por_categoria():
 # --------------------------
 @app.get("/servicos/mais_comprados")
 async def listar_servicos_mais_comprados():
+    cache_key = "servicos_mais_comprados"
+    if (cache := redis_client.get(cache_key)):
+        return {"servicos_mais_comprados": eval(cache)}
+
     pipeline = [
         {"$unwind": "$visitas"},
         {"$group": {
@@ -210,11 +228,9 @@ async def listar_servicos_mais_comprados():
     ]
 
     resultados = list(clientes.aggregate(pipeline))
-    
     mais_comprados = [(doc["_id"], doc["quantidade"]) for doc in resultados]
-    
+    redis_client.setex(cache_key, 120, str(mais_comprados))
     return {"servicos_mais_comprados": mais_comprados}
-
 
 
 # --------------------------
@@ -258,6 +274,10 @@ def feedbacks_negativos(limite: int = 10, nota_maxima: int = 4):
 # --------------------------
 @app.get("/feedbacks/top")
 def top_servicos_mais_bem_avaliados(limite: int = 5):
+    cache_key = f"top_servicos_{limite}"
+    if (cache := redis_client.get(cache_key)):
+        return {"top_servicos": eval(cache)}
+
     pipeline = [
         {"$group": {
             "_id": "$servico",
@@ -268,7 +288,9 @@ def top_servicos_mais_bem_avaliados(limite: int = 5):
         {"$limit": limite}
     ]
     resultados = list(feedbacks.aggregate(pipeline))
+    redis_client.setex(cache_key, 120, str(resultados))
     return {"top_servicos": resultados}
+
 
 # --------------------------
 # Avaliação média dos feedbacks de todos os serviços
@@ -334,7 +356,10 @@ def campanhas_por_segmento(segmento: str):
 # --------------------------
 @app.get("/campanhas/retorno")
 def retorno_campanhas():
-    # Exemplo: para cada campanha, conta quantos clientes do segmento participaram e quantos agendaram serviço
+    cache_key = "retorno_campanhas"
+    if (cache := redis_client.get(cache_key)):
+        return {"retorno_campanhas": eval(cache)}
+
     pipeline = [
         {
             "$lookup": {
@@ -362,7 +387,9 @@ def retorno_campanhas():
         }
     ]
     resultados = list(campanhas.aggregate(pipeline))
+    redis_client.setex(cache_key, 120, str(resultados))
     return {"retorno_campanhas": resultados}
+
 
 # --------------------------
 # Listar campanhas ativas
@@ -427,6 +454,10 @@ def taxa_ocupacao(periodo: str = "dia"):
     if periodo not in ["dia", "semana", "mes"]:
         raise HTTPException(status_code=400, detail="Período inválido. Use: dia, semana ou mes.")
 
+    cache_key = f"ocupacao_{periodo}"
+    if (cache := redis_client.get(cache_key)):
+        return {"ocupacao_por_" + periodo: eval(cache)}
+
     formatos = {
         "dia": {"$dateToString": {"format": "%Y-%m-%d", "date": {"$toDate": "$dataHora"}}},
         "semana": {"$dateToString": {"format": "%Y-%U", "date": {"$toDate": "$dataHora"}}},
@@ -445,4 +476,5 @@ def taxa_ocupacao(periodo: str = "dia"):
     ]
 
     resultados = list(db.agendamentos.aggregate(pipeline))
+    redis_client.setex(cache_key, 120, str(resultados))
     return {"ocupacao_por_" + periodo: resultados}
