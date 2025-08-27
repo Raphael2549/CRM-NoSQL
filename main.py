@@ -1,32 +1,27 @@
+import os
+import random
+import time
+import json
+from collections import Counter
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
+from typing import Optional
+
+from bson import ObjectId
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
-from typing import Optional
-from datetime import datetime
-from datetime import datetime, timedelta
-import random
-from contextlib import asynccontextmanager
-from collections import Counter
-import os
-from bson import ObjectId
 import redis
-from dotenv import load_dotenv
-import time
-# Em main.py, no topo do arquivo
-
-# Substitua sua linha de importação de 'models' por esta linha completa:
+# Importa todos os modelos Pydantic do arquivo models.py
 from models import Cliente, UpdateCliente, Servico, UpdateServico, Agendamento, Feedback, Campanha, UpdateCampanha
 
-# ... (resto do seu código) ...
 load_dotenv()
 redis_uri = os.getenv("REDIS_URL")
 # Conectar ao Redis Cloud
 redis_client = redis.from_url(redis_uri, decode_responses=True)
-    
-
 
 mongo_uri = os.getenv("MONGODB_URI")
-
 
 client = MongoClient(mongo_uri, server_api=ServerApi('1'))
 # Define banco e coleções
@@ -37,102 +32,90 @@ campanhas = db["campanhas"]
 feedbacks = db["feedbacks"]
 agendamentos = db["agendamentos"]
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Criar índices na inicialização da API
-    clientes.create_index("email", unique=True)
-    campanhas.create_index("status")
-    campanhas.create_index("segmento")
-    feedbacks.create_index("servico")
-    agendamentos.create_index("status")
-
-    yield
-
-app = FastAPI(lifespan=lifespan)
+app = FastAPI()
 
 # --------------------------
-# Contar Clientes Únicos por Mês (com Redis HLL)
+# Contagem EXATA de Clientes Únicos por Mês (via MongoDB com Cache)
 # --------------------------
 @app.get("/clientes/unicos")
-def contar_clientes_unicos_hll(mes: Optional[str] = None):
+def contar_clientes_unicos(mes: str):
     """
-    Retorna o número APROXIMADO de clientes únicos do mês informado
-    usando Redis HyperLogLog. Se nenhum mês for passado, usa o mês atual.
+    Retorna o número EXATO de clientes únicos com visitas no mês informado.
     Formato do mês: AAAA-MM
     """
-    if not mes:
-        mes = datetime.now().strftime("%Y-%m")
+    cache_key = f"clientes_unicos_exatos:{mes}"
+    if (cache := redis_client.get(cache_key)):
+        return {"mes": mes, "clientes_unicos_exato": json.loads(cache), "fonte": "cache"}
 
-    hll_key = f"clientes_unicos:{mes}"
-    total_unicos = redis_client.pfcount(hll_key)
+    pipeline = [
+        {"$unwind": "$visitas"},
+        {"$match": {"visitas.data": {"$regex": f"^{mes}"}}},
+        {"$group": {"_id": "$email"}},
+        {"$count": "total_unicos"}
+    ]
+    
+    resultado = list(clientes.aggregate(pipeline))
+    total_unicos = resultado[0]['total_unicos'] if resultado else 0
 
-    return {"mes": mes, "clientes_unicos_aproximado": total_unicos}
+    redis_client.setex(cache_key, 3600, json.dumps(total_unicos))
 
-
+    return {"mes": mes, "clientes_unicos_exato": total_unicos, "fonte": "banco de dados"}
 
 # --------------------------
 #CADASTRO DE CLIENTES
 # --------------------------
-@app.post("/cadastro_clientes")
-def cadastrar_cliente(cliente: dict):
-    if clientes.find_one({"email": cliente.get("email")}):
-        raise HTTPException(status_code=400, detail="Cliente já cadastrado")
-    clientes.insert_one(cliente)
-    return {"mensagem": "Cliente cadastrado com sucesso"}
+@app.post("/cadastro_clientes", status_code=201)
+def cadastrar_cliente(cliente: Cliente):
+    if clientes.find_one({"email": cliente.email}):
+        raise HTTPException(status_code=409, detail="Cliente com este e-mail já cadastrado")
+    
+    cliente_dict = cliente.model_dump(by_alias=True)
+    clientes.insert_one(cliente_dict)
+    return {"mensagem": "Cliente cadastrado com sucesso", "cliente": cliente_dict}
 
 # --------------------------
 # Atualizar dados do cliente
 # --------------------------
 @app.put("/clientes/{id}")
-def atualizar_cliente(id: str, dados: dict):
-    result = clientes.update_one({"_id": ObjectId(id)}, {"$set": dados})
+def atualizar_cliente(id: str, dados_update: UpdateCliente):
+    update_data = dados_update.model_dump(exclude_unset=True, by_alias=True)
+    if not update_data:
+        raise HTTPException(status_code=400, detail="Nenhum dado para atualizar foi fornecido.")
+
+    result = clientes.update_one({"_id": ObjectId(id)}, {"$set": update_data})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Cliente não encontrado")
     return {"mensagem": "Cliente atualizado com sucesso"}
-
-
 
 # --------------------------
 # Remover cliente
 # --------------------------
 @app.delete("/clientes/{id}")
 def remover_cliente(id: str):
-    # Primeiro, encontra o cliente para pegar o e-mail antes de apagar
     cliente_a_remover = clientes.find_one({"_id": ObjectId(id)})
     if not cliente_a_remover:
         raise HTTPException(status_code=404, detail="Cliente não encontrado")
 
     cliente_email = cliente_a_remover.get("email")
 
-    # --- AÇÃO EM CASCATA: Cancelar Agendamentos Futuros ---
     if cliente_email:
-        # Encontra agendamentos "confirmados" para este cliente a partir de agora
-        agendamentos_cancelados = agendamentos.update_many(
-            {
-                "cliente_email": cliente_email,
-                "status": "confirmado",
-                "data_hora": {"$gte": datetime.now()}
-            },
+        agendamentos.update_many(
+            {"cliente_email": cliente_email, "status": "confirmado", "data_hora": {"$gte": datetime.now()}},
             {"$set": {"status": "cancelado_cliente_excluido"}}
         )
-        print(f"{agendamentos_cancelados.modified_count} agendamentos futuros foram cancelados.")
-    # --- FIM DA AÇÃO EM CASCATA ---
     
-    # Agora, apaga o cliente do banco de dados
     result = clientes.delete_one({"_id": ObjectId(id)})
-    
     if result.deleted_count == 0:
-        # Esta verificação é uma segurança extra, embora o find_one acima já verifique
         raise HTTPException(status_code=404, detail="Cliente não encontrado")
         
     return {"mensagem": "Cliente removido e agendamentos futuros cancelados com sucesso."}
+
 # --------------------------
 # Listar todos ou buscar por filtros
 # --------------------------
 @app.get("/clientes")
 def listar_clientes(nome: Optional[str] = None, email: Optional[str] = None, ultima_visita: Optional[str] = None):
     pipeline = []
-
     match_stage = {}
     if nome:
         match_stage["nome"] = {"$regex": nome, "$options": "i"}
@@ -144,7 +127,7 @@ def listar_clientes(nome: Optional[str] = None, email: Optional[str] = None, ult
     if match_stage:
         pipeline.append({"$match": match_stage})
 
-    pipeline.append({"$project": {"_id": 0}})  # remove _id para retorno mais limpo
+    pipeline.append({"$project": {"_id": 0}}) 
 
     resultados = list(clientes.aggregate(pipeline))
     return {"clientes": resultados}
@@ -158,15 +141,10 @@ def aniversariantes_do_mes(mes: Optional[int] = None):
         mes = datetime.now().month
 
     pipeline = [
-        {
-            "$addFields": {
-                "mesNascimento": {"$toInt": {"$substr": ["$dataNascimento", 5, 2]}}
-            }
-        },
+        {"$addFields": {"mesNascimento": {"$toInt": {"$substr": ["$dataNascimento", 5, 2]}}}},
         {"$match": {"mesNascimento": mes}},
         {"$project": {"_id": 0, "nome": 1, "email": 1, "dataNascimento": 1}}
     ]
-
     resultados = list(clientes.aggregate(pipeline))
     return {"mes": mes, "aniversariantes": resultados}
 
@@ -179,7 +157,7 @@ def ranking_clientes_frequentes():
     cache_key = "ranking_clientes"
     if (cache := redis_client.get(cache_key)):
         elapsed = time.time() - start_time
-        return {"ranking_clientes": eval(cache), "tempo_execucao": f"{elapsed:.6f} segundos"}
+        return {"ranking_clientes": json.loads(cache), "tempo_execucao": f"{elapsed:.6f} segundos"}
 
     pipeline = [
         {"$unwind": "$visitas"},
@@ -191,9 +169,8 @@ def ranking_clientes_frequentes():
         }},
         {"$sort": {"quantidade_visitas": -1}}
     ]
-
     resultados = list(clientes.aggregate(pipeline))
-    redis_client.setex(cache_key, 120, str(resultados))
+    redis_client.setex(cache_key, 120, json.dumps(resultados, default=str))
 
     elapsed = time.time() - start_time
     return {"ranking_clientes": resultados, "tempo_execucao": f"{elapsed:.6f} segundos"}
@@ -212,73 +189,58 @@ def calcular_preferencias_dinamicamente(email: str):
         }},
         {"$sort": {"quantidade": -1}},
         {"$limit": 3}
-        ]
-    
+    ]
     resultados = list(clientes.aggregate(pipeline))
-    
     if not resultados:
         return {"erro": "Cliente não encontrado ou sem visitas registradas"}
     
     preferencias_ordenadas = [doc["_id"] for doc in resultados]
-
-    return {
-        "email": email,
-        "preferencias_calculadas": preferencias_ordenadas
-    }
-
+    return {"email": email, "preferencias_calculadas": preferencias_ordenadas}
 
 # --------------------------
 # Cadastrar serviço
 # --------------------------
-@app.post("/servicos")
-def cadastrar_servico(servico: dict):
-    if db.servicos.find_one({"nome": servico.get("nome")}):
-        raise HTTPException(status_code=400, detail="Serviço já cadastrado")
-    db.servicos.insert_one(servico)
-    return {"mensagem": "Serviço cadastrado com sucesso"}
-
+@app.post("/servicos", status_code=201)
+def cadastrar_servico(servico: Servico):
+    if servicos.find_one({"nome": servico.nome}):
+        raise HTTPException(status_code=409, detail="Serviço com este nome já cadastrado")
+    servico_dict = servico.model_dump(by_alias=True)
+    servicos.insert_one(servico_dict)
+    return {"mensagem": "Serviço cadastrado com sucesso", "servico": servico_dict}
 
 # --------------------------
 # Atualizar serviço
 # --------------------------
 @app.put("/servicos/{id}")
 def atualizar_servico(id: str, dados_update: UpdateServico):
-    # Converte os dados recebidos para um dicionário
     update_data = dados_update.model_dump(exclude_unset=True, by_alias=True)
     
-    # --- AÇÃO EM CASCATA: Bloquear Alteração de Nome ---
-    # Verifica se o campo "nome" está presente nos dados enviados para atualização
     if "nome" in update_data:
         raise HTTPException(
-            status_code=400, # Bad Request
+            status_code=400,
             detail="A alteração do nome de um serviço não é permitida. Para isso, inative o serviço atual e crie um novo."
         )
-    # --- FIM DA AÇÃO EM CASCATA ---
 
     if not update_data:
         raise HTTPException(status_code=400, detail="Nenhum dado para atualizar foi fornecido.")
     
     result = servicos.update_one({"_id": ObjectId(id)}, {"$set": update_data})
-    
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Serviço não encontrado")
         
     return {"mensagem": "Serviço atualizado com sucesso"}
-
 
 # --------------------------
 # Remover serviço
 # --------------------------
 @app.delete("/servicos/{id}")
 def remover_servico(id: str):
-    # Primeiro, encontra o serviço para pegar o nome
     servico_a_remover = servicos.find_one({"_id": ObjectId(id)})
     if not servico_a_remover:
         raise HTTPException(status_code=404, detail="Serviço não encontrado")
 
     nome_servico = servico_a_remover.get("nome")
 
-    # --- AÇÃO EM CASCATA: Verificar Agendamentos Futuros ---
     if nome_servico:
         agendamento_futuro = agendamentos.find_one({
             "servico": nome_servico,
@@ -286,17 +248,13 @@ def remover_servico(id: str):
             "data_hora": {"$gte": datetime.now()}
         })
         
-        # Se encontrou um agendamento, bloqueia a exclusão
         if agendamento_futuro:
             raise HTTPException(
-                status_code=409, # 409 Conflict
+                status_code=409,
                 detail="Este serviço não pode ser excluído pois possui agendamentos futuros."
             )
-    # --- FIM DA AÇÃO EM CASCATA ---
     
-    # Se passou pela verificação, pode apagar o serviço
     result = servicos.delete_one({"_id": ObjectId(id)})
-    
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Serviço não encontrado")
         
@@ -308,41 +266,33 @@ def remover_servico(id: str):
 @app.get("/servicos/categorias")
 def listar_servicos_por_categoria():
     pipeline = [
-        {
-            "$group": {
-                "_id": "$categoria",
-                "servicos": {"$push": {"nome": "$nome", "preco": "$preco", "duracaoMinutos": "$duracaoMinutos"}},
-                "total_servicos": {"$sum": 1}
-            }
-        },
+        {"$group": {
+            "_id": "$categoria",
+            "servicos": {"$push": {"nome": "$nome", "preco": "$preco", "duracaoMinutos": "$duracaoMinutos"}},
+            "total_servicos": {"$sum": 1}
+        }},
         {"$sort": {"_id": 1}}
     ]
-    resultados = list(db.servicos.aggregate(pipeline))
+    resultados = list(servicos.aggregate(pipeline))
     return {"categorias": resultados}
 
 # --------------------------
 # Ranking de serviços mais comprados
 # --------------------------
 @app.get("/servicos/mais_comprados")
-async def listar_servicos_mais_comprados():
+def listar_servicos_mais_comprados():
     cache_key = "servicos_mais_comprados"
     if (cache := redis_client.get(cache_key)):
-        return {"servicos_mais_comprados": eval(cache)}
+        return {"servicos_mais_comprados": json.loads(cache)}
 
     pipeline = [
         {"$unwind": "$visitas"},
-        {"$group": {
-            "_id": "$visitas.serviço",
-            "quantidade": {"$sum": 1}
-        }},
+        {"$group": {"_id": "$visitas.serviço", "quantidade": {"$sum": 1}}},
         {"$sort": {"quantidade": -1}}
     ]
-
     resultados = list(clientes.aggregate(pipeline))
-    mais_comprados = [(doc["_id"], doc["quantidade"]) for doc in resultados]
-    redis_client.setex(cache_key, 120, str(mais_comprados))
-    return {"servicos_mais_comprados": mais_comprados}
-
+    redis_client.setex(cache_key, 120, json.dumps(resultados, default=str))
+    return {"servicos_mais_comprados": resultados}
 
 # --------------------------
 # Cadastrar feedback
@@ -352,17 +302,12 @@ def cadastrar_feedback(feedback: Feedback):
     feedback_dict = feedback.model_dump(by_alias=True)
     feedbacks.insert_one(feedback_dict)
 
-    # --- AÇÃO EM CASCATA: Invalidação de Cache ---
-    # Tenta apagar as chaves de cache que dependem das notas de feedback
     try:
-        # O "*" é um curinga para apagar todas as variações (top_5, top_10, etc.)
         keys_to_delete = redis_client.keys("top_servicos_*")
         if keys_to_delete:
             redis_client.delete(*keys_to_delete)
-            print("Cache de 'top_servicos' invalidado com sucesso.")
     except Exception as e:
         print(f"AVISO: Falha ao invalidar o cache de feedbacks no Redis: {e}")
-    # --- FIM DA AÇÃO EM CASCATA ---
         
     return {"mensagem": "Feedback cadastrado com sucesso"}
 
@@ -400,7 +345,7 @@ def feedbacks_negativos(limite: int = 10, nota_maxima: int = 4):
 def top_servicos_mais_bem_avaliados(limite: int = 5):
     cache_key = f"top_servicos_{limite}"
     if (cache := redis_client.get(cache_key)):
-        return {"top_servicos": eval(cache)}
+        return {"top_servicos": json.loads(cache)}
 
     pipeline = [
         {"$group": {
@@ -412,15 +357,14 @@ def top_servicos_mais_bem_avaliados(limite: int = 5):
         {"$limit": limite}
     ]
     resultados = list(feedbacks.aggregate(pipeline))
-    redis_client.setex(cache_key, 120, str(resultados))
+    redis_client.setex(cache_key, 120, json.dumps(resultados, default=str))
     return {"top_servicos": resultados}
-
 
 # --------------------------
 # Avaliação média dos feedbacks de todos os serviços
 # --------------------------
 @app.get("/feedbacks/media")
-async def calcular_nota_media(servico: str):
+def calcular_nota_media(servico: str):
     pipeline = [
         {"$match": {"servico": servico}},
         {"$group": {
@@ -429,36 +373,35 @@ async def calcular_nota_media(servico: str):
             "quantidade": {"$sum": 1}
         }}
     ]
-    
     resultado = list(feedbacks.aggregate(pipeline))
-    
     if not resultado:
         return {"servico": servico, "mensagem": "Nenhum feedback encontrado."}
-    
     dados = resultado[0]
-    
     return {
         "servico": servico,
         "quantidade_feedbacks": dados["quantidade"],
         "nota_media": round(dados["media"], 2)
     }
 
-
 # --------------------------
 # Criar campanha
 # --------------------------
-
-@app.post("/campanhas")
-def criar_campanha(campanha: dict):
-    campanhas.insert_one(campanha)
+@app.post("/campanhas", status_code=201)
+def criar_campanha(campanha: Campanha):
+    campanha_dict = campanha.model_dump(by_alias=True)
+    campanhas.insert_one(campanha_dict)
     return {"mensagem": "Campanha criada com sucesso"}
 
 # --------------------------
 # 2. Atualizar campanha
 # --------------------------
 @app.put("/campanhas/{id}")
-def atualizar_campanha(id: str, dados: dict):
-    result = campanhas.update_one({"_id": ObjectId(id)}, {"$set": dados})
+def atualizar_campanha(id: str, dados_update: UpdateCampanha):
+    update_data = dados_update.model_dump(exclude_unset=True, by_alias=True)
+    if not update_data:
+        raise HTTPException(status_code=400, detail="Nenhum dado para atualizar foi fornecido.")
+    
+    result = campanhas.update_one({"_id": ObjectId(id)}, {"$set": update_data})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Campanha não encontrada")
     return {"mensagem": "Campanha atualizada com sucesso"}
@@ -482,44 +425,37 @@ def campanhas_por_segmento(segmento: str):
 def retorno_campanhas():
     cache_key = "retorno_campanhas"
     if (cache := redis_client.get(cache_key)):
-        return {"retorno_campanhas": eval(cache)}
+        return {"retorno_campanhas": json.loads(cache)}
 
     pipeline = [
-        {
-            "$lookup": {
-                "from": "clientes",
-                "localField": "segmento",
-                "foreignField": "segmento",
-                "as": "clientes_segmento"
-            }
-        },
-        {
-            "$lookup": {
-                "from": "agendamentos",
-                "localField": "nome",
-                "foreignField": "campanha_nome",
-                "as": "agendamentos_campanha"
-            }
-        },
-        {
-            "$project": {
-                "_id": 0,
-                "nome": 1,
-                "clientes_impactados": {"$size": "$clientes_segmento"},
-                "agendamentos_realizados": {"$size": "$agendamentos_campanha"}
-            }
-        }
+        {"$lookup": {
+            "from": "clientes",
+            "localField": "segmento",
+            "foreignField": "segmento",
+            "as": "clientes_segmento"
+        }},
+        {"$lookup": {
+            "from": "agendamentos",
+            "localField": "nome",
+            "foreignField": "campanha_nome",
+            "as": "agendamentos_campanha"
+        }},
+        {"$project": {
+            "_id": 0,
+            "nome": 1,
+            "clientes_impactados": {"$size": "$clientes_segmento"},
+            "agendamentos_realizados": {"$size": "$agendamentos_campanha"}
+        }}
     ]
     resultados = list(campanhas.aggregate(pipeline))
-    redis_client.setex(cache_key, 120, str(resultados))
+    redis_client.setex(cache_key, 120, json.dumps(resultados, default=str))
     return {"retorno_campanhas": resultados}
-
 
 # --------------------------
 # Listar campanhas ativas
 # --------------------------
 @app.get("/campanhas/ativas")
-async def campanhas_ativas_para_segmento(segmento: Optional[str] = None):
+def campanhas_ativas_para_segmento(segmento: Optional[str] = None):
     filtro = {"status": "ativa"}
     if segmento:
         filtro["segmento"] = segmento
@@ -528,26 +464,76 @@ async def campanhas_ativas_para_segmento(segmento: Optional[str] = None):
 
 
 # --------------------------
-# Busca de agendamento por status
+# Meta Diária de Clientes
 # --------------------------
-# --------------------------
-# Alterar status
-# --------------------------
-
-
+@app.get("/campanhas/meta-diaria")
+def get_daily_goal_status(data: Optional[str] = None):
+    """
+    Verifica o status da campanha "primeiros 5 clientes do dia".
+    Se nenhuma data for fornecida, usa a data atual.
+    Formato da data: AAAA-MM-DD
+    """
+    # Se nenhuma data for passada, usa a data de hoje como padrão
+    if data is None:
+        data = datetime.now().strftime("%Y-%m-%d")
+    
+    meta_do_dia = 5
+    chave_meta = f"meta_diaria:{data}"
+    
+    # Conta quantos clientes únicos foram atendidos na data especificada
+    clientes_atendidos = redis_client.bitcount(chave_meta)
+    
+    clientes_restantes = meta_do_dia - clientes_atendidos
+    
+    if clientes_restantes < 0:
+        clientes_restantes = 0
+        
+    campanha_ainda_valida = clientes_atendidos < meta_do_dia
+        
+    return {
+        "data": data,
+        "meta_clientes_unicos": meta_do_dia,
+        "clientes_atingidos_hoje": clientes_atendidos, # Mudei o nome para ser mais genérico
+        "clientes_restantes_para_meta": clientes_restantes,
+        "campanha_ainda_valida": campanha_ainda_valida
+    }
 
 # --------------------------
 # Criar agendamento
 # --------------------------
-@app.post("/agendamentos")
-def criar_agendamento(agendamento: dict):
-    db.agendamentos.insert_one(agendamento)
-    return {"mensagem": "Agendamento criado com sucesso"}
-
-
+@app.post("/agendamentos", status_code=201)
+def criar_agendamento(agendamento: Agendamento):
+    cliente_existente = clientes.find_one({"email": agendamento.cliente_email})
+    if not cliente_existente:
+        raise HTTPException(
+            status_code=404, 
+            detail="Cliente não encontrado. Não é possível criar um agendamento para um cliente não cadastrado."
+        )
+    
+    agendamento_dict = agendamento.model_dump(by_alias=True)
+    
+    # --- INÍCIO DA CORREÇÃO ---
+    # Insere o documento e pega o resultado da inserção
+    resultado_insert = agendamentos.insert_one(agendamento_dict)
+    # Busca o documento recém-criado usando o ID retornado
+    agendamento_criado = agendamentos.find_one({"_id": resultado_insert.inserted_id})
+    # Converte o campo _id para string
+    agendamento_criado["_id"] = str(agendamento_criado["_id"])
+    # --- FIM DA CORREÇÃO ---
+    
+    return {"mensagem": "Agendamento criado com sucesso", "agendamento": agendamento_criado}
 
 # --------------------------
-# Alterar status (Versão Final e Completa)
+# Alterar status (Com lógica de meta limitada a 5)
+# --------------------------
+# Em main.py
+
+# Em main.py
+
+# Em main.py
+
+# --------------------------
+# Alterar status (Versão com a correção final do nome do campo)
 # --------------------------
 @app.put("/agendamentos/{id}/status")
 def alterar_status_agendamento(id: str, status: str):
@@ -560,9 +546,14 @@ def alterar_status_agendamento(id: str, status: str):
         {"$set": {"status": status}}
     )
 
+    mensagem_retorno = {"mensagem": f"Status do agendamento atualizado para '{status}' com sucesso."}
+
     if status.lower() in ["concluido", "concluído"]:
-        cliente_email = agendamento.get("cliente_email")
+        # --- INÍCIO DA CORREÇÃO ---
+        # Corrigido de "cliente_email" para "clienteEmail" para corresponder ao que está no banco
+        cliente_email = agendamento.get("clienteEmail")
         data_hora_do_banco = agendamento.get("dataHora")
+        # --- FIM DA CORREÇÃO ---
 
         if cliente_email and data_hora_do_banco:
             if isinstance(data_hora_do_banco, str):
@@ -571,14 +562,11 @@ def alterar_status_agendamento(id: str, status: str):
                 data_hora_obj = data_hora_do_banco
             
             data_visita_str = data_hora_obj.strftime("%Y-%m-%d")
-
             nova_visita = {
                 "data": data_visita_str,
                 "serviço": agendamento.get("servico")
             }
             
-            # --- LÓGICA ATUALIZADA ---
-            # Adiciona a nova visita E atualiza o campo ultimaVisita
             clientes.update_one(
                 {"email": cliente_email},
                 {
@@ -586,13 +574,67 @@ def alterar_status_agendamento(id: str, status: str):
                     "$set": {"ultimaVisita": data_visita_str}
                 }
             )
-            # --- FIM DA ATUALIZAÇÃO ---
 
             try:
                 mes = data_hora_obj.strftime("%Y-%m")
-                hll_key = f"clientes_unicos:{mes}"
-                redis_client.pfadd(hll_key, cliente_email)
-            except Exception as e:
-                print(f"AVISO: Falha ao atualizar o HyperLogLog no Redis: {e}")
+                redis_client.delete(f"clientes_unicos_exatos:{mes}")
+                redis_client.delete("ranking_clientes")
+                redis_client.delete("servicos_mais_comprados")
 
-    return {"mensagem": f"Status do agendamento atualizado para '{status}' com sucesso."}
+                meta_do_dia = 5
+                chave_meta = f"meta_diaria:{data_hora_obj.strftime('%Y-%m-%d')}"
+                chave_mapeamento = "email_para_id"
+                
+                id_cliente = redis_client.hget(chave_mapeamento, cliente_email)
+                if id_cliente is None:
+                    id_cliente = redis_client.incr("proximo_id_cliente")
+                    redis_client.hset(chave_mapeamento, cliente_email, id_cliente)
+                id_cliente = int(id_cliente)
+
+                ja_veio_hoje = redis_client.getbit(chave_meta, id_cliente)
+
+                if ja_veio_hoje == 0:
+                    contagem_atual = redis_client.bitcount(chave_meta)
+                    if contagem_atual < meta_do_dia:
+                        redis_client.setbit(chave_meta, id_cliente, 1)
+                        mensagem_retorno["promocao_diaria"] = f"Parabéns! Este foi o cliente único número {contagem_atual + 1} de {meta_do_dia}."
+                    else:
+                        mensagem_retorno["promocao_diaria"] = f"Meta de {meta_do_dia} clientes únicos já atingida para o dia {data_hora_obj.strftime('%Y-%m-%d')}."
+                else:
+                    mensagem_retorno["promocao_diaria"] = "Cliente já foi contado para a meta deste dia."
+
+            except Exception as e:
+                print(f"AVISO: Falha na comunicação com o Redis: {e}")
+
+    return mensagem_retorno
+# --------------------------
+# Taxa de ocupação por dia/semana/mês
+# --------------------------
+@app.get("/agendamentos/ocupacao")
+def taxa_ocupacao(periodo: str = "dia"):
+    if periodo not in ["dia", "semana", "mes"]:
+        raise HTTPException(status_code=400, detail="Período inválido. Use: dia, semana ou mes.")
+
+    cache_key = f"ocupacao_{periodo}"
+    if (cache := redis_client.get(cache_key)):
+        return {"ocupacao_por_" + periodo: json.loads(cache)}
+
+    formatos = {
+        "dia": {"$dateToString": {"format": "%Y-%m-%d", "date": {"$toDate": "$dataHora"}}},
+        "semana": {"$dateToString": {"format": "%Y-%U", "date": {"$toDate": "$dataHora"}}},
+        "mes": {"$dateToString": {"format": "%Y-%m", "date": {"$toDate": "$dataHora"}}}
+    }
+
+    pipeline = [
+        {"$addFields": {"periodo": formatos[periodo]}},
+        {"$group": {
+            "_id": "$periodo",
+            "total_agendamentos": {"$sum": 1},
+            "confirmados": {"$sum": {"$cond": [{"$eq": ["$status", "confirmado"]}, 1, 0]}},
+            "cancelados": {"$sum": {"$cond": [{"$eq": ["$status", "cancelado"]}, 1, 0]}}
+        }},
+        {"$sort": {"_id": 1}}
+    ]
+    resultados = list(agendamentos.aggregate(pipeline))
+    redis_client.setex(cache_key, 120, json.dumps(resultados, default=str))
+    return {"ocupacao_por_" + periodo: resultados}
