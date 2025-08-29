@@ -43,6 +43,8 @@ Criar um sistema inteligente que utiliza um banco NoSQL para:
   "valorGastoTotal": 850.00
 }
 
+# **Para o proessor:**
+
 ## **Atividade 04/09 (Estrutura de Dados Avançada do Redis)**
 
 Para esta atividade, foi implementada a estrutura de dados **Redis Bitmap** para criar uma funcionalidade de campanha em tempo real, que rastreia e limita uma promoção diária para os primeiros 5 clientes únicos.
