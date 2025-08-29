@@ -42,3 +42,118 @@ Criar um sistema inteligente que utiliza um banco NoSQL para:
   "ultimaVisita": "2025-07-10",
   "valorGastoTotal": 850.00
 }
+
+## **Atividade 04/09 (Estrutura de Dados Avançada do Redis)**
+
+Para esta atividade, foi implementada a estrutura de dados **Redis Bitmap** para criar uma funcionalidade de campanha em tempo real, que rastreia e limita uma promoção diária para os primeiros 5 clientes únicos.
+
+### **O que é Redis Bitmap?**
+
+É uma estrutura de dados extremamente eficiente em termos de memória que permite rastrear informações binárias (sim/não, ativo/inativo) para milhões de usuários. Cada usuário é mapeado para um "bit" em uma longa sequência, e podemos ligar ou desligar esse bit para registrar uma ação, usando comandos como `SETBIT`, `GETBIT` e `BITCOUNT`.
+
+### **Como foi implementado?**
+
+A lógica foi dividida em duas partes principais no arquivo `main.py`: a **escrita** (quando um cliente participa da promoção) e a **leitura** (para consultar o status da campanha).
+
+#### **1. Registrando a Participação (A Escrita)**
+
+A lógica de escrita é acionada por uma ação de negócio crucial: a conclusão de um agendamento.
+
+- **Gatilho:** Dentro do endpoint `PUT /agendamentos/{id}/status`, quando o status é alterado para "Concluído".
+- **Mapeamento de Clientes:** Como Bitmaps requerem IDs numéricos, o sistema utiliza um `Hash` do Redis (`email_para_id`) para criar um mapeamento permanente entre o e-mail do cliente e um ID numérico único (gerado por um contador `INCR` do Redis, `proximo_id_cliente`).
+- **Lógica Condicional:** Antes de registrar, o sistema verifica se a meta de 5 clientes únicos já foi atingida naquele dia usando `BITCOUNT`. Se a meta estiver em aberto e aquele cliente específico ainda não tiver sido registrado (verificado com `GETBIT`), o sistema executa o `SETBIT`, marcando o cliente como participante.
+
+***Trecho do endpoint `PUT /agendamentos/{id}/status` em `main.py`:***
+```python
+# ... (dentro do if status.lower() in ["concluido", "concluído"])
+try:
+    meta_do_dia = 5
+    chave_meta = f"meta_diaria:{data_hora_obj.strftime('%Y-%m-%d')}"
+    
+    # Pega ou cria o ID numérico do cliente
+    id_cliente = redis_client.hget("email_para_id", cliente_email)
+    if id_cliente is None:
+        id_cliente = redis_client.incr("proximo_id_cliente")
+        redis_client.hset("email_para_id", cliente_email, id_cliente)
+    
+    id_cliente = int(id_cliente)
+
+    # Verifica se o cliente já participou hoje
+    ja_veio_hoje = redis_client.getbit(chave_meta, id_cliente)
+
+    if ja_veio_hoje == 0:
+        contagem_atual = redis_client.bitcount(chave_meta)
+        if contagem_atual < meta_do_dia:
+            # Marca o cliente no bitmap
+            redis_client.setbit(chave_meta, id_cliente, 1)
+            # Adiciona mensagem de sucesso na resposta da API
+            mensagem_retorno["promocao_diaria"] = f"Parabéns! Este foi o cliente único número {contagem_atual + 1} de {meta_do_dia}."
+# ...
+```
+
+#### **2. Consultando o Status da Campanha (A Leitura)**
+
+Foi criado um endpoint dedicado para que a equipe do salão possa consultar o andamento da promoção em tempo real.
+
+- **Endpoint:** `GET /campanhas/meta-diaria`
+- **Lógica:** Este endpoint simplesmente usa o comando `BITCOUNT` na chave do dia solicitado (ex: `meta_diaria:2025-08-29`) para contar quantos bits estão ligados (quantos clientes únicos já participaram). Com base nesse número, ele retorna um JSON com o status atual da campanha.
+
+***Trecho do endpoint `GET /campanhas/meta-diaria` em `main.py`:***
+```python
+@app.get("/campanhas/meta-diaria")
+def get_daily_goal_status(data: Optional[str] = None):
+    # ...
+    if data is None:
+        data = datetime.now().strftime("%Y-%m-%d")
+    
+    chave_meta = f"meta_diaria:{data}"
+    
+    # Conta quantos clientes únicos foram atendidos na data
+    clientes_atendidos = redis_client.bitcount(chave_meta)
+    
+    return {
+        "data": data,
+        "meta_clientes_unicos": 5,
+        "clientes_atingidos_hoje": clientes_atendidos,
+        # ...
+    }
+```
+
+### **Resultado Final**
+
+Essa implementação adiciona uma funcionalidade de negócio interativa e de alto valor, utilizando uma estrutura de dados avançada do Redis de forma eficiente e robusta. O sistema é resiliente a reinicializações (devido à facilidade de reconstruir a métrica diária a partir do MongoDB) e protege o banco de dados principal de consultas complexas, ao mesmo tempo em que fornece feedback em tempo real para o usuário da API.
+
+
+### **Demonstração Visual do Fluxo (Prints)**
+
+A sequência de testes abaixo foi realizada para demonstrar o ciclo de vida completo da campanha "Primeiros 5 Clientes Únicos do Dia".
+
+#### **1. Criação do Primeiro Agendamento**
+
+Um novo agendamento é criado para um cliente. A API retorna o `_id` do novo documento, que será usado para finalizar o serviço.
+
+![Criação do Agendamento](https://github.com/Raphael2549/CRM-NoSQL/blob/97ab2b2d8b1f4304172a1c429dabd67c211ecf96/Prints/Bitmap/Bitmap_criando_agendamento.png)
+
+---
+
+#### **2. Finalização do 1º Cliente e Confirmação da Campanha**
+
+O agendamento é marcado como "Concluído". A resposta da API confirma o sucesso e informa que este foi o **cliente único número 1 de 5** a participar da promoção.
+
+![Finalização do Primeiro Agendamento](https://github.com/Raphael2549/CRM-NoSQL/blob/97ab2b2d8b1f4304172a1c429dabd67c211ecf96/Prints/Bitmap/Bitmap_agendamento_conclu%C3%ADdo.png)
+
+---
+
+#### **3. Status Final da Campanha (Meta Atingida)**
+
+Após repetir o processo para 5 clientes únicos, a consulta ao endpoint da meta diária mostra que o limite foi atingido e a campanha do dia não está mais válida.
+
+![Meta Diária Atingida](https://github.com/Raphael2549/CRM-NoSQL/blob/97ab2b2d8b1f4304172a1c429dabd67c211ecf96/Prints/Bitmap/Bitmap_meta_diaria_atingida.png)
+
+---
+
+#### **4. Tentativa de Finalizar o 6º Cliente Único**
+
+Ao finalizar o agendamento de um sexto cliente único, o sistema corretamente informa que a promoção para aquele dia já se encerrou, e a contagem no Bitmap não é incrementada.
+
+![Tentativa com o 6º Cliente](https://github.com/Raphael2549/CRM-NoSQL/blob/97ab2b2d8b1f4304172a1c429dabd67c211ecf96/Prints/Bitmap/Bitmap_tentativa_sexto_agendamento.png)
