@@ -19,7 +19,7 @@ Criar um sistema inteligente que utiliza um banco NoSQL para:
 ## Tecnologias Utilizadas
 
 - **Banco de Dados**: MongoDB (ou outro NoSQL como Firebase, CouchDB, etc.)
-- **Backend**: Node.js / Python / outro (dependendo da stack escolhida)
+- **Backend**: Python (FastAPI)
 - **APIs**: E-mail, WhatsApp, SMS (para envio de promoções)
 - **Dashboard**: (opcional) React, Vue, ou HTML/CSS para visualização de dados
 
@@ -42,8 +42,9 @@ Criar um sistema inteligente que utiliza um banco NoSQL para:
   "ultimaVisita": "2025-07-10",
   "valorGastoTotal": 850.00
 }
+```
 
-# **Para o proessor:**
+---
 
 ## **Atividade 04/09 (Estrutura de Dados Avançada do Redis)**
 
@@ -125,7 +126,6 @@ def get_daily_goal_status(data: Optional[str] = None):
 
 Essa implementação adiciona uma funcionalidade de negócio interativa e de alto valor, utilizando uma estrutura de dados avançada do Redis de forma eficiente e robusta. O sistema é resiliente a reinicializações (devido à facilidade de reconstruir a métrica diária a partir do MongoDB) e protege o banco de dados principal de consultas complexas, ao mesmo tempo em que fornece feedback em tempo real para o usuário da API.
 
-
 ### **Demonstração Visual do Fluxo (Prints)**
 
 A sequência de testes abaixo foi realizada para demonstrar o ciclo de vida completo da campanha "Primeiros 5 Clientes Únicos do Dia".
@@ -134,7 +134,7 @@ A sequência de testes abaixo foi realizada para demonstrar o ciclo de vida comp
 
 Um novo agendamento é criado para um cliente. A API retorna o `_id` do novo documento, que será usado para finalizar o serviço.
 
-![Criação do Agendamento](https://github.com/Raphael2549/CRM-NoSQL/blob/97ab2b2d8b1f4304172a1c429dabd67c211ecf96/Prints/Bitmap/Bitmap_criando_agendamento.png)
+![Criação do Agendamento](https://raw.githubusercontent.com/Raphael2549/CRM-NoSQL/97ab2b2d8b1f4304172a1c429dabd67c211ecf96/Prints/Bitmap/Bitmap_criando_agendamento.png)
 
 ---
 
@@ -142,7 +142,7 @@ Um novo agendamento é criado para um cliente. A API retorna o `_id` do novo doc
 
 O agendamento é marcado como "Concluído". A resposta da API confirma o sucesso e informa que este foi o **cliente único número 1 de 5** a participar da promoção.
 
-![Finalização do Primeiro Agendamento](https://github.com/Raphael2549/CRM-NoSQL/blob/97ab2b2d8b1f4304172a1c429dabd67c211ecf96/Prints/Bitmap/Bitmap_agendamento_conclu%C3%ADdo.png)
+![Finalização do Primeiro Agendamento](https://raw.githubusercontent.com/Raphael2549/CRM-NoSQL/97ab2b2d8b1f4304172a1c429dabd67c211ecf96/Prints/Bitmap/Bitmap_agendamento_conclu%C3%ADdo.png)
 
 ---
 
@@ -150,7 +150,7 @@ O agendamento é marcado como "Concluído". A resposta da API confirma o sucesso
 
 Após repetir o processo para 5 clientes únicos, a consulta ao endpoint da meta diária mostra que o limite foi atingido e a campanha do dia não está mais válida.
 
-![Meta Diária Atingida](https://github.com/Raphael2549/CRM-NoSQL/blob/97ab2b2d8b1f4304172a1c429dabd67c211ecf96/Prints/Bitmap/Bitmap_meta_diaria_atingida.png)
+![Meta Diária Atingida](https://raw.githubusercontent.com/Raphael2549/CRM-NoSQL/97ab2b2d8b1f4304172a1c429dabd67c211ecf96/Prints/Bitmap/Bitmap_meta_diaria_atingida.png)
 
 ---
 
@@ -158,4 +158,4 @@ Após repetir o processo para 5 clientes únicos, a consulta ao endpoint da meta
 
 Ao finalizar o agendamento de um sexto cliente único, o sistema corretamente informa que a promoção para aquele dia já se encerrou, e a contagem no Bitmap não é incrementada.
 
-![Tentativa com o 6º Cliente](https://github.com/Raphael2549/CRM-NoSQL/blob/97ab2b2d8b1f4304172a1c429dabd67c211ecf96/Prints/Bitmap/Bitmap_tentativa_sexto_agendamento.png)
+![Tentativa com o 6º Cliente](https://raw.githubusercontent.com/Raphael2549/CRM-NoSQL/97ab2b2d8b1f4304172a1c429dabd67c211ecf96/Prints/Bitmap/Bitmap_tentativa_sexto_agendamento.png)
