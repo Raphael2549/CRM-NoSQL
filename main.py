@@ -660,7 +660,6 @@ def taxa_ocupacao(periodo: str = "dia"):
     resultados = list(agendamentos.aggregate(pipeline))
     redis_client.setex(cache_key, 120, json.dumps(resultados, default=str))
     return {"ocupacao_por_" + periodo: resultados}
-# Em main.py, substitua a função inteira por esta:
 
 @app.get("/clientes/similares/{email_cliente}", tags=["Análise de Grafos (GDS)"])
 def encontrar_clientes_similares(email_cliente: str, top_k: int = 5):
@@ -675,8 +674,7 @@ def encontrar_clientes_similares(email_cliente: str, top_k: int = 5):
     graph_name = "crm-similarity-graph"
 
     try:
-        # --- ETAPA 1: Projetar o Grafo na memória do GDS (usando Cypher) ---
-        # Garantimos que nenhum grafo antigo exista antes de criar um novo.
+
         if gds.graph.exists(graph_name).exists:
             gds.run_cypher(f"CALL gds.graph.drop('{graph_name}', false)")
 
@@ -690,8 +688,6 @@ def encontrar_clientes_similares(email_cliente: str, top_k: int = 5):
             )
         """)
 
-        # --- ETAPA 2: Executar o Algoritmo de Similaridade (usando Cypher) ---
-        # Esta consulta executa o algoritmo e filtra os resultados para o cliente desejado.
         cypher_query = f"""
             CALL gds.nodeSimilarity.stream('{graph_name}')
             YIELD node1, node2, similarity
@@ -727,7 +723,6 @@ def encontrar_clientes_similares(email_cliente: str, top_k: int = 5):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro durante a análise de grafos: {e}")
 
-    finally:
-        # --- ETAPA 3: Limpeza (remove o grafo da memória usando Cypher) ---
+    finally:---
         if gds and gds.graph.exists(graph_name).exists:
             gds.run_cypher(f"CALL gds.graph.drop('{graph_name}', false)")
