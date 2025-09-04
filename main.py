@@ -2,6 +2,10 @@ import os
 import random
 import time
 import json
+import certifi
+
+from neo4j import GraphDatabase
+from graphdatascience import GraphDataScience
 from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -31,6 +35,24 @@ servicos = db["servicos"]
 campanhas = db["campanhas"]
 feedbacks = db["feedbacks"]
 agendamentos = db["agendamentos"]
+
+# --- Configuração e Conexão com Neo4j GDS ---
+NEO4J_URI = os.getenv("NEO4J_URI", "neo4j://localhost:7687")
+NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
+
+# Tenta conectar ao GDS. Se falhar, a funcionalidade de análise fica desativada.
+if not NEO4J_PASSWORD:
+    print("AVISO: Senha do Neo4j (NEO4J_PASSWORD) não definida no .env. A análise de grafos será desativada.")
+    gds = None
+else:
+    try:
+        gds = GraphDataScience(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+        gds.set_database("neo4j") # Garante que estamos usando o banco de dados padrão
+        print("Conexão com a biblioteca Neo4j GDS bem-sucedida!")
+    except Exception as e:
+        print(f"AVISO: Não foi possível conectar ao GDS. A análise de grafos será desativada. Detalhe: {e}")
+        gds = None
 
 app = FastAPI()
 
@@ -638,3 +660,74 @@ def taxa_ocupacao(periodo: str = "dia"):
     resultados = list(agendamentos.aggregate(pipeline))
     redis_client.setex(cache_key, 120, json.dumps(resultados, default=str))
     return {"ocupacao_por_" + periodo: resultados}
+# Em main.py, substitua a função inteira por esta:
+
+@app.get("/clientes/similares/{email_cliente}", tags=["Análise de Grafos (GDS)"])
+def encontrar_clientes_similares(email_cliente: str, top_k: int = 5):
+    """
+    Encontra os 'top_k' clientes mais similares a um cliente específico,
+    baseado nos serviços que eles compraram em comum (Índice de Jaccard).
+    Funciona na Edição Community do Neo4j.
+    """
+    if gds is None:
+        raise HTTPException(status_code=503, detail="Serviço de Análise de Grafos (GDS) indisponível.")
+
+    graph_name = "crm-similarity-graph"
+
+    try:
+        # --- ETAPA 1: Projetar o Grafo na memória do GDS (usando Cypher) ---
+        # Garantimos que nenhum grafo antigo exista antes de criar um novo.
+        if gds.graph.exists(graph_name).exists:
+            gds.run_cypher(f"CALL gds.graph.drop('{graph_name}', false)")
+
+        gds.run_cypher(f"""
+            CALL gds.graph.project(
+                '{graph_name}',
+                ['Cliente', 'Servico'],
+                {{
+                    COMPROU: {{ orientation: 'UNDIRECTED' }}
+                }}
+            )
+        """)
+
+        # --- ETAPA 2: Executar o Algoritmo de Similaridade (usando Cypher) ---
+        # Esta consulta executa o algoritmo e filtra os resultados para o cliente desejado.
+        cypher_query = f"""
+            CALL gds.nodeSimilarity.stream('{graph_name}')
+            YIELD node1, node2, similarity
+            WITH gds.util.asNode(node1) AS cliente1, gds.util.asNode(node2) AS cliente2, similarity
+            WHERE cliente1.email = $email_cliente AND cliente1 <> cliente2
+            RETURN
+                cliente2.nome AS nome,
+                cliente2.email AS email,
+                similarity
+            ORDER BY similarity DESC
+            LIMIT $top_k
+        """
+        
+        results = gds.run_cypher(
+            cypher_query,
+            params={
+                "email_cliente": email_cliente,
+                "top_k": top_k
+            }
+        )
+
+        if results.empty:
+            return {
+                "cliente_origem": email_cliente,
+                "clientes_similares": []
+            }
+
+        return {
+            "cliente_origem": email_cliente,
+            "clientes_similares": results.to_dict('records')
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro durante a análise de grafos: {e}")
+
+    finally:
+        # --- ETAPA 3: Limpeza (remove o grafo da memória usando Cypher) ---
+        if gds and gds.graph.exists(graph_name).exists:
+            gds.run_cypher(f"CALL gds.graph.drop('{graph_name}', false)")
